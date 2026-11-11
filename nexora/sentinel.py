@@ -1,6 +1,7 @@
 """Core Sentinel Decorator and Execution Manager."""
 
 import hashlib
+import inspect
 import json
 import time
 from typing import Callable, Any, Dict, Optional
@@ -36,9 +37,15 @@ class NexoraSentinel:
     ):
         def decorator(func: Callable) -> Callable:
             tool_name = name or func.__name__
+            sig = inspect.signature(func)
 
             def wrapper(*args, **kwargs) -> Any:
                 session_id = kwargs.pop("_nexora_session_id", "default_session")
+
+                # Bind positional and keyword arguments into one lookup dictionary
+                bound_args = sig.bind_partial(*args, **kwargs)
+                bound_args.apply_defaults()
+                all_args = bound_args.arguments
 
                 # 1. Budget Circuit Breaker Check
                 current_spend = self._session_spend.get(session_id, 0.0)
@@ -49,8 +56,9 @@ class NexoraSentinel:
                     )
 
                 # 2. Idempotency Check for Side-Effect Tools
+                idem_key = None
                 if is_side_effect and idempotency_key_param:
-                    idem_key = kwargs.get(idempotency_key_param)
+                    idem_key = all_args.get(idempotency_key_param)
                     if not idem_key:
                         raise IdempotencyViolationError(
                             f"Side-effect tool '{tool_name}' requires parameter '{idempotency_key_param}'."
@@ -87,8 +95,8 @@ class NexoraSentinel:
                 # Record state and spend post-success
                 history.append(state_hash)
                 self._session_spend[session_id] = current_spend + estimated_cost
-                if is_side_effect and idempotency_key_param:
-                    self._executed_idempotency_keys.add(kwargs.get(idempotency_key_param))
+                if is_side_effect and idempotency_key_param and idem_key:
+                    self._executed_idempotency_keys.add(idem_key)
 
                 return result
 
